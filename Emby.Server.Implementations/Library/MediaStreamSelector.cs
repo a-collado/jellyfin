@@ -60,7 +60,7 @@ namespace Emby.Server.Implementations.Library
                 // If no subtitles of preferred language available, use default behaviour.
                 if (!preferredLanguages.Contains(audioTrackLanguage, StringComparison.OrdinalIgnoreCase))
                 {
-                    stream = sortedStreams.FirstOrDefault(x => preferredLanguages.Contains(x.Language, StringComparison.OrdinalIgnoreCase)) ??
+                    stream = sortedStreams.FirstOrDefault(x => preferredLanguages.Contains(x.Language, StringComparison.OrdinalIgnoreCase) && (x.Language == audioTrackLanguage || !x.IsForced || audioTrackLanguage == "und") && !x.Title.Contains("latin", StringComparison.OrdinalIgnoreCase)) ??
                         sortedStreams.FirstOrDefault(x => x.IsExternal || x.IsForced || x.IsDefault);
                 }
                 else
