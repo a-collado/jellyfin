@@ -60,7 +60,7 @@ namespace Emby.Server.Implementations.Library
                 // If no subtitles of preferred language available, use default behaviour.
                 if (!preferredLanguages.Contains(audioTrackLanguage, StringComparison.OrdinalIgnoreCase))
                 {
-                    stream = sortedStreams.FirstOrDefault(x => preferredLanguages.Contains(x.Language, StringComparison.OrdinalIgnoreCase) && (x.Language == audioTrackLanguage || !x.IsForced || audioTrackLanguage == "und") && !x.Title.Contains("latin", StringComparison.OrdinalIgnoreCase)) ??
+                    stream = sortedStreams.FirstOrDefault(x => preferredLanguages.Contains(x.Language, StringComparison.OrdinalIgnoreCase) && (x.Language == audioTrackLanguage || !x.IsForced || IsLanguageUndefined(audioTrackLanguage)) && !TitleIsLatino(x)) ??
                         sortedStreams.FirstOrDefault(x => x.IsExternal || x.IsForced || x.IsDefault);
                 }
                 else
@@ -154,6 +154,27 @@ namespace Emby.Server.Implementations.Library
             score = (score * 10) + (stream.IsTextSubtitleStream ? 2 : 1);
             score = (score * 10) + (stream.IsExternal ? 2 : 1);
             return score;
+        }
+
+        private static bool IsLanguageUndefined(string language)
+        {
+            // Check for null, empty, or known placeholders
+            return string.IsNullOrEmpty(language) ||
+                language.Equals("und", StringComparison.OrdinalIgnoreCase) ||
+                language.Equals("unknown", StringComparison.OrdinalIgnoreCase) ||
+                language.Equals("undetermined", StringComparison.OrdinalIgnoreCase) ||
+                language.Equals("mul", StringComparison.OrdinalIgnoreCase) ||
+                language.Equals("zxx", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool TitleIsLatino(MediaStream stream)
+        {
+            if (stream.Title is null)
+            {
+                return false;
+            }
+
+            return stream.Title.Contains("latin", StringComparison.OrdinalIgnoreCase);
         }
     }
 }
