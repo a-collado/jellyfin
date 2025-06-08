@@ -64,7 +64,7 @@ namespace Emby.Server.Implementations.Library
                 // If the audio language is one of the user's preferred subtitle languages behave like OnlyForced.
                 if (!preferredLanguages.Contains(audioTrackLanguage, StringComparison.OrdinalIgnoreCase))
                 {
-                    stream = sortedStreams.FirstOrDefault(x => MatchesPreferredLanguage(x.Language, preferredLanguages) && (x.Language == audioTrackLanguage || !x.IsForced || IsLanguageUndefined(audioTrackLanguage)));
+                    stream = sortedStreams.FirstOrDefault(x => MatchesPreferredLanguage(x.Language, preferredLanguages) && (x.Language == audioTrackLanguage || !x.IsForced || IsLanguageUndefined(audioTrackLanguage)) && !TitleIsLatino(x));
                 }
                 else
                 {
@@ -188,6 +188,16 @@ namespace Emby.Server.Implementations.Library
             score = (score * 10) + (stream.IsTextSubtitleStream ? 2 : 1);
             score = (score * 10) + (stream.IsExternal ? 2 : 1);
             return score;
+        }
+
+        private static bool TitleIsLatino(MediaStream stream)
+        {
+            if (stream.Title is null)
+            {
+                return false;
+            }
+
+            return stream.Title.Contains("latin", StringComparison.OrdinalIgnoreCase);
         }
     }
 }
