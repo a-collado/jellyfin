@@ -75,6 +75,7 @@ public sealed class BaseItemRepository
     private static readonly IReadOnlyList<ItemValueType> _getAlbumArtistValueTypes = [ItemValueType.AlbumArtist];
     private static readonly IReadOnlyList<ItemValueType> _getStudiosValueTypes = [ItemValueType.Studios];
     private static readonly IReadOnlyList<ItemValueType> _getGenreValueTypes = [ItemValueType.Genre];
+    private static readonly IReadOnlyList<char> SearchWildcardTerms = ['%', '_', '[', ']', '^'];
 
     /// <summary>
     /// Initializes a new instance of the <see cref="BaseItemRepository"/> class.
@@ -266,12 +267,13 @@ public sealed class BaseItemRepository
         IQueryable<BaseItemEntity> dbQuery = PrepareItemQuery(context, filter);
 
         dbQuery = TranslateQuery(dbQuery, context, filter);
+        dbQuery = ApplyGroupingFilter(context, dbQuery, filter);
+
         if (filter.EnableTotalRecordCount)
         {
             result.TotalRecordCount = dbQuery.Count();
         }
 
-        dbQuery = ApplyGroupingFilter(context, dbQuery, filter);
         dbQuery = ApplyQueryPaging(dbQuery, filter);
 
         result.Items = dbQuery.AsEnumerable().Where(e => e is not null).Select(w => DeserializeBaseItem(w, filter.SkipDeserialization)).ToArray();
@@ -1230,8 +1232,20 @@ public sealed class BaseItemRepository
             ExcludeItemIds = filter.ExcludeItemIds
         };
 
-        var query = TranslateQuery(innerQuery, context, outerQueryFilter)
-            .GroupBy(e => e.PresentationUniqueKey);
+        var masterQuery = TranslateQuery(innerQuery, context, outerQueryFilter)
+            .GroupBy(e => e.PresentationUniqueKey)
+            .Select(e => e.FirstOrDefault())
+            .Select(e => e!.Id);
+
+        var query = context.BaseItems
+            .Include(e => e.TrailerTypes)
+            .Include(e => e.Provider)
+            .Include(e => e.LockedFields)
+            .Include(e => e.Images)
+            .AsSingleQuery()
+            .Where(e => masterQuery.Contains(e.Id));
+
+        query = ApplyOrder(query, filter);
 
         var result = new QueryResult<(BaseItemDto, ItemCounts?)>();
         if (filter.EnableTotalRecordCount)
@@ -1286,12 +1300,7 @@ public sealed class BaseItemRepository
 
             var resultQuery = query.Select(e => new
             {
-                item = e.AsQueryable()
-                        .Include(e => e.TrailerTypes)
-                        .Include(e => e.Provider)
-                        .Include(e => e.LockedFields)
-                        .Include(e => e.Images)
-                        .AsSingleQuery().First(),
+                item = e,
                 // TODO: This is bad refactor!
                 itemCount = new ItemCounts()
                 {
@@ -1323,13 +1332,6 @@ public sealed class BaseItemRepository
             result.Items =
             [
                 .. query
-                    .Select(e => e.AsQueryable()
-                        .Include(e => e.TrailerTypes)
-                        .Include(e => e.Provider)
-                        .Include(e => e.LockedFields)
-                        .Include(e => e.Images)
-                        .AsSingleQuery()
-                        .First())
                     .AsEnumerable()
                     .Where(e => e is not null)
                     .Select<BaseItemEntity, (BaseItemDto, ItemCounts?)>(e =>
@@ -1693,7 +1695,15 @@ public sealed class BaseItemRepository
         if (!string.IsNullOrEmpty(filter.SearchTerm))
         {
             var searchTerm = filter.SearchTerm.ToLower();
-            baseQuery = baseQuery.Where(e => e.CleanName!.ToLower().Contains(searchTerm) || (e.OriginalTitle != null && e.OriginalTitle.ToLower().Contains(searchTerm)));
+            if (SearchWildcardTerms.Any(f => searchTerm.Contains(f)))
+            {
+                searchTerm = $"%{searchTerm.Trim('%')}%";
+                baseQuery = baseQuery.Where(e => EF.Functions.Like(e.CleanName!.ToLower(), searchTerm) || (e.OriginalTitle != null && EF.Functions.Like(e.OriginalTitle.ToLower(), searchTerm)));
+            }
+            else
+            {
+                baseQuery = baseQuery.Where(e => e.CleanName!.ToLower().Contains(searchTerm) || (e.OriginalTitle != null && e.OriginalTitle.ToLower().Contains(searchTerm)));
+            }
         }
 
         if (filter.IsFolder.HasValue)
@@ -1865,10 +1875,17 @@ public sealed class BaseItemRepository
 
         if (filter.PersonIds.Length > 0)
         {
+            var peopleEntityIds = context.BaseItems
+                .WhereOneOrMany(filter.PersonIds, b => b.Id)
+                .Join(
+                    context.Peoples,
+                    b => b.Name,
+                    p => p.Name,
+                    (b, p) => p.Id);
+
             baseQuery = baseQuery
-                .Where(e =>
-                    context.PeopleBaseItemMap.Where(w => context.BaseItems.Where(r => filter.PersonIds.Contains(r.Id)).Any(f => f.Name == w.People.Name))
-                        .Any(f => f.ItemId == e.Id));
+                .Where(e => context.PeopleBaseItemMap
+                    .Any(m => m.ItemId == e.Id && peopleEntityIds.Contains(m.PeopleId)));
         }
 
         if (!string.IsNullOrWhiteSpace(filter.Person))
@@ -1904,9 +1921,17 @@ public sealed class BaseItemRepository
         var nameContains = filter.NameContains;
         if (!string.IsNullOrWhiteSpace(nameContains))
         {
-            baseQuery = baseQuery.Where(e =>
-                e.CleanName!.Contains(nameContains)
-                || e.OriginalTitle!.ToLower().Contains(nameContains!));
+            if (SearchWildcardTerms.Any(f => nameContains.Contains(f)))
+            {
+                nameContains = $"%{nameContains.Trim('%')}%";
+                baseQuery = baseQuery.Where(e => EF.Functions.Like(e.CleanName, nameContains) || EF.Functions.Like(e.OriginalTitle, nameContains));
+            }
+            else
+            {
+                baseQuery = baseQuery.Where(e =>
+                                    e.CleanName!.Contains(nameContains)
+                                    || e.OriginalTitle!.ToLower().Contains(nameContains!));
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(filter.NameStartsWith))
@@ -1989,7 +2014,7 @@ public sealed class BaseItemRepository
 
         if (filter.ArtistIds.Length > 0)
         {
-            baseQuery = baseQuery.WhereReferencedItem(context, ItemValueType.Artist, filter.ArtistIds);
+            baseQuery = baseQuery.WhereReferencedItemMultipleTypes(context, [ItemValueType.Artist, ItemValueType.AlbumArtist], filter.ArtistIds);
         }
 
         if (filter.AlbumArtistIds.Length > 0)
@@ -1999,7 +2024,18 @@ public sealed class BaseItemRepository
 
         if (filter.ContributingArtistIds.Length > 0)
         {
-            baseQuery = baseQuery.WhereReferencedItem(context, ItemValueType.Artist, filter.ContributingArtistIds);
+            var contributingNames = context.BaseItems
+                .Where(b => filter.ContributingArtistIds.Contains(b.Id))
+                .Select(b => b.CleanName);
+
+            baseQuery = baseQuery.Where(e =>
+                e.ItemValues!.Any(ivm =>
+                    ivm.ItemValue.Type == ItemValueType.Artist &&
+                    contributingNames.Contains(ivm.ItemValue.CleanValue))
+                &&
+                !e.ItemValues!.Any(ivm =>
+                    ivm.ItemValue.Type == ItemValueType.AlbumArtist &&
+                    contributingNames.Contains(ivm.ItemValue.CleanValue)));
         }
 
         if (filter.AlbumIds.Length > 0)
@@ -2054,22 +2090,26 @@ public sealed class BaseItemRepository
         if (filter.MinParentalRating != null)
         {
             var min = filter.MinParentalRating;
-            minParentalRatingFilter = e => e.InheritedParentalRatingValue >= min.Score || e.InheritedParentalRatingValue == null;
-            if (min.SubScore != null)
-            {
-                minParentalRatingFilter = minParentalRatingFilter.And(e => e.InheritedParentalRatingValue >= min.SubScore || e.InheritedParentalRatingValue == null);
-            }
+            var minScore = min.Score;
+            var minSubScore = min.SubScore ?? 0;
+
+            minParentalRatingFilter = e =>
+                e.InheritedParentalRatingValue == null ||
+                e.InheritedParentalRatingValue > minScore ||
+                (e.InheritedParentalRatingValue == minScore && (e.InheritedParentalRatingSubValue ?? 0) >= minSubScore);
         }
 
         Expression<Func<BaseItemEntity, bool>>? maxParentalRatingFilter = null;
         if (filter.MaxParentalRating != null)
         {
             var max = filter.MaxParentalRating;
-            maxParentalRatingFilter = e => e.InheritedParentalRatingValue <= max.Score || e.InheritedParentalRatingValue == null;
-            if (max.SubScore != null)
-            {
-                maxParentalRatingFilter = maxParentalRatingFilter.And(e => e.InheritedParentalRatingValue <= max.SubScore || e.InheritedParentalRatingValue == null);
-            }
+            var maxScore = max.Score;
+            var maxSubScore = max.SubScore ?? 0;
+
+            maxParentalRatingFilter = e =>
+                e.InheritedParentalRatingValue == null ||
+                e.InheritedParentalRatingValue < maxScore ||
+                (e.InheritedParentalRatingValue == maxScore && (e.InheritedParentalRatingSubValue ?? 0) <= maxSubScore);
         }
 
         if (filter.HasParentalRating ?? false)

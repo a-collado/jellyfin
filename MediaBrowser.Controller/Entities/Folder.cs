@@ -337,6 +337,11 @@ namespace MediaBrowser.Controller.Entities
 
             try
             {
+                if (GetParents().Any(f => f.Id.Equals(Id)))
+                {
+                    throw new InvalidOperationException("Recursive datastructure detected abort processing this item.");
+                }
+
                 await ValidateChildrenInternal2(progress, recursive, refreshChildMetadata, allowRemoveRoot, refreshOptions, directoryService, cancellationToken).ConfigureAwait(false);
             }
             finally
@@ -452,6 +457,12 @@ namespace MediaBrowser.Controller.Entities
                 {
                     foreach (var item in itemsRemoved)
                     {
+                        if (!item.CanDelete())
+                        {
+                            Logger.LogDebug("Item marked as non-removable, skipping: {Path}", item.Path ?? item.Name);
+                            continue;
+                        }
+
                         if (item.IsFileProtocol)
                         {
                             Logger.LogDebug("Removed item: {Path}", item.Path);
@@ -1346,6 +1357,14 @@ namespace MediaBrowser.Controller.Entities
             var realChildren = visibleChildren
                 .Where(e => query is null || UserViewBuilder.FilterItem(e, query))
                 .ToArray();
+
+            if (this is BoxSet && (query.OrderBy is null || query.OrderBy.Count == 0))
+            {
+                realChildren = realChildren
+                    .OrderBy(e => e.ProductionYear ?? int.MaxValue)
+                    .ToArray();
+            }
+
             var childCount = realChildren.Length;
             if (result.Count < limit)
             {
