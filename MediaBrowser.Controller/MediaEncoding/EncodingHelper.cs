@@ -2914,8 +2914,8 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             if (time > 0)
             {
-                // For direct streaming/remuxing, we seek at the exact position of the keyframe
-                // However, ffmpeg will seek to previous keyframe when the exact time is the input
+                // For direct streaming/remuxing, HLS segments start at keyframes.
+                // However, ffmpeg will seek to previous keyframe when the exact frame time is the input
                 // Workaround this by adding 0.5s offset to the seeking time to get the exact keyframe on most videos.
                 // This will help subtitle syncing.
                 var isHlsRemuxing = state.IsVideoRequest && state.TranscodingType is TranscodingJobType.Hls && IsCopyCodec(state.OutputVideoCodec);
@@ -2932,17 +2932,16 @@ namespace MediaBrowser.Controller.MediaEncoding
 
                 if (state.IsVideoRequest)
                 {
-                    var outputVideoCodec = GetVideoEncoder(state, options);
-                    var segmentFormat = GetSegmentFileExtension(segmentContainer).TrimStart('.');
-
-                    // Important: If this is ever re-enabled, make sure not to use it with wtv because it breaks seeking
-                    // Disable -noaccurate_seek on mpegts container due to the timestamps issue on some clients,
-                    // but it's still required for fMP4 container otherwise the audio can't be synced to the video.
-                    if (!string.Equals(state.InputContainer, "wtv", StringComparison.OrdinalIgnoreCase)
-                        && !string.Equals(segmentFormat, "ts", StringComparison.OrdinalIgnoreCase)
-                        && state.TranscodingType != TranscodingJobType.Progressive
-                        && !state.EnableBreakOnNonKeyFrames(outputVideoCodec)
-                        && (state.BaseRequest.StartTimeTicks ?? 0) > 0)
+                    // If we are remuxing, then the copied stream cannot be seeked accurately (it will seek to the nearest
+                    // keyframe). If we are using fMP4, then force all other streams to use the same inaccurate seeking to
+                    // avoid A/V sync issues which cause playback issues on some devices.
+                    // When remuxing video, the segment start times correspond to key frames in the source stream, so this
+                    // option shouldn't change the seeked point that much.
+                    // Important: make sure not to use it with wtv because it breaks seeking
+                    if (state.TranscodingType is TranscodingJobType.Hls
+                        && string.Equals(segmentContainer, "mp4", StringComparison.OrdinalIgnoreCase)
+                        && (IsCopyCodec(state.OutputVideoCodec) || IsCopyCodec(state.OutputAudioCodec))
+                        && !string.Equals(state.InputContainer, "wtv", StringComparison.OrdinalIgnoreCase))
                     {
                         seekParam += " -noaccurate_seek";
                     }
@@ -6359,6 +6358,21 @@ namespace MediaBrowser.Controller.MediaEncoding
                     }
                 }
 
+                // Block unsupported H.264 Hi422P and Hi444PP profiles, which can be encoded with 4:2:0 pixel format
+                if (string.Equals(videoStream.Codec, "h264", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (videoStream.Profile.Contains("4:2:2", StringComparison.OrdinalIgnoreCase)
+                        || videoStream.Profile.Contains("4:4:4", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // VideoToolbox on Apple Silicon has H.264 Hi444PP and theoretically also has Hi422P
+                        if (!(hardwareAccelerationType == HardwareAccelerationType.videotoolbox
+                              && RuntimeInformation.OSArchitecture.Equals(Architecture.Arm64)))
+                        {
+                            return null;
+                        }
+                    }
+                }
+
                 var decoder = hardwareAccelerationType switch
                 {
                     HardwareAccelerationType.vaapi => GetVaapiVidDecoder(state, options, videoStream, bitDepth),
@@ -7039,8 +7053,8 @@ namespace MediaBrowser.Controller.MediaEncoding
 
                 if (string.Equals(videoStream.Codec, "av1", StringComparison.OrdinalIgnoreCase))
                 {
-                    var accelType = GetHwaccelType(state, options, "av1", bitDepth, hwSurface);
-                    return accelType + ((!string.IsNullOrEmpty(accelType) && isAfbcSupported) ? " -afbc rga" : string.Empty);
+                    // there's an issue about AV1 AFBC on RK3588, disable it for now until it's fixed upstream
+                    return GetHwaccelType(state, options, "av1", bitDepth, hwSurface);
                 }
             }
 
@@ -7069,7 +7083,7 @@ namespace MediaBrowser.Controller.MediaEncoding
         }
 
 #nullable disable
-        public void TryStreamCopy(EncodingJobInfo state)
+        public void TryStreamCopy(EncodingJobInfo state, EncodingOptions options)
         {
             if (state.VideoStream is not null && CanStreamCopyVideo(state, state.VideoStream))
             {
@@ -7086,8 +7100,14 @@ namespace MediaBrowser.Controller.MediaEncoding
                 }
             }
 
+            var preventHlsAudioCopy = state.TranscodingType is TranscodingJobType.Hls
+                && state.VideoStream is not null
+                && !IsCopyCodec(state.OutputVideoCodec)
+                && options.HlsAudioSeekStrategy is HlsAudioSeekStrategy.TranscodeAudio;
+
             if (state.AudioStream is not null
-                && CanStreamCopyAudio(state, state.AudioStream, state.SupportedAudioCodecs))
+                && CanStreamCopyAudio(state, state.AudioStream, state.SupportedAudioCodecs)
+                && !preventHlsAudioCopy)
             {
                 state.OutputAudioCodec = "copy";
             }
