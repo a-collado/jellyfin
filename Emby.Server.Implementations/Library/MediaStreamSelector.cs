@@ -197,7 +197,9 @@ namespace Emby.Server.Implementations.Library
                 return false;
             }
 
-            return stream.Title.Contains("latin", StringComparison.OrdinalIgnoreCase);
+            return stream.Title.Contains("latin", StringComparison.OrdinalIgnoreCase)
+            || 
+            stream.Title.Contains("latam", StringComparison.OrdinalIgnoreCase);
         }
     }
 }
